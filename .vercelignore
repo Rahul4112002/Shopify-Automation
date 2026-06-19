@@ -1,0 +1,12 @@
+tests/
+__pycache__/
+.pytest_cache/
+instance/
+static/
+*.log
+*.csv
+*.xlsx
+*.xls
+*.xlsb
+README.md
+requirements-dev.txt
