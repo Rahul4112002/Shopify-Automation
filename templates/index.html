@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Shopify Product Listing Automation</title>
+  <link rel="stylesheet" href="{{ url_for('static_asset', filename='styles.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Shopify Product Listing Automation</h1>
+    </div>
+    <div class="status-chip">Flask + Pandas</div>
+  </header>
+
+  <main class="layout">
+    <aside class="report-panel">
+      <div class="panel-title">Report Statistics</div>
+      {% if result %}
+      <div class="status-card {{ 'status-pass' if result.report_stats.status == 'Passed' else 'status-review' }}">
+        <span>Run Status</span>
+        <strong>{{ result.report_stats.status }}</strong>
+      </div>
+      <div class="stat-grid">
+        <div class="stat-card pass"><span>Passed</span><strong>{{ result.report_stats.passed_skus }}</strong></div>
+        <div class="stat-card fail"><span>Failed</span><strong>{{ result.report_stats.failed_skus }}</strong></div>
+      </div>
+      <div class="report-list">
+        <p><strong>Total SKUs:</strong> {{ result.report_stats.total_skus }}</p>
+        <p><strong>Lookup Passed:</strong> {{ result.report_stats.lookup_passed }}</p>
+        <p><strong>Missing Content:</strong> {{ result.report_stats.missing_content }}</p>
+        <p><strong>Missing GS1:</strong> {{ result.report_stats.missing_gs1 }}</p>
+        <p><strong>Missing Images:</strong> {{ result.report_stats.missing_images }}</p>
+        <p><strong>Warnings:</strong> {{ result.report_stats.warning_count }}</p>
+        <p><strong>Output Rows:</strong> {{ result.report_stats.output_rows }}</p>
+        <p><strong>Image URLs:</strong> {{ result.report_stats.images_written }}</p>
+      </div>
+      {% else %}
+      <div class="status-card status-pending">
+        <span>Run Status</span>
+        <strong>Waiting</strong>
+      </div>
+      <div class="report-list">
+        <p><strong>Passed:</strong> Run pending</p>
+        <p><strong>Failed:</strong> Run pending</p>
+        <p><strong>Reports:</strong> CSV, Excel, and QA workbook</p>
+        <p><strong>Checks:</strong> SKU lookup, image coverage, warnings</p>
+      </div>
+      {% endif %}
+    </aside>
+
+    <section class="workbench">
+      {% if error %}
+      <div class="alert alert-error">
+        <strong>Pipeline stopped</strong>
+        <span>{{ error }}</span>
+      </div>
+      {% endif %}
+
+      {% if is_vercel and not blob_uploads_enabled %}
+      <div class="alert alert-warning">
+        <strong>Vercel upload limit</strong>
+        <span>This deployment can only process uploads up to {{ upload_limit_mb }} MB total. Larger production files need direct upload storage such as Vercel Blob.</span>
+      </div>
+      {% elif blob_uploads_enabled %}
+      <div class="alert alert-success">
+        <strong>Vercel Blob Ready</strong>
+        <span>Large files upload directly to Blob before processing, so the app avoids the Vercel Function upload limit.</span>
+      </div>
+      {% endif %}
+
+      <form
+        class="upload-form"
+        action="{{ url_for('process') }}"
+        method="post"
+        enctype="multipart/form-data"
+        data-max-upload-mb="{{ upload_limit_mb }}"
+        data-blob-enabled="{{ '1' if blob_uploads_enabled else '0' }}"
+        data-blob-upload-url="/api/blob-upload"
+      >
+        <div class="upload-grid">
+          <label class="upload-card">
+            <span class="upload-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M12 16V4m0 0 5 5m-5-5-5 5"/><path d="M4 16v3h16v-3"/></svg>
+            </span>
+            <span class="upload-title">Content Master</span>
+            <span class="upload-copy">Detected Sheet: {{ result.content_info.sheet_name if result else 'Auto' }}</span>
+            <input type="file" name="content_master" accept=".xlsx,.xls" required>
+          </label>
+
+          <label class="upload-card">
+            <span class="upload-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M4 5h16v14H4z"/><path d="M8 9h8M8 13h8"/></svg>
+            </span>
+            <span class="upload-title">GS1</span>
+            <span class="upload-copy">Detected Sheet: {{ result.gs1_info.sheet_name if result else 'Auto' }}</span>
+            <input type="file" name="gs1" accept=".xlsx,.xls,.xlsb" required>
+          </label>
+
+          <label class="upload-card">
+            <span class="upload-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7 0l2-2a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-2 2a5 5 0 0 0 7 7l1-1"/></svg>
+            </span>
+            <span class="upload-title">Dropbox Image Links</span>
+            <span class="upload-copy">Detected Sheet: {{ result.image_stats.selected_sheet if result else 'Auto' }}</span>
+            <input type="file" name="dropbox_links" accept=".xlsx,.xls" required>
+          </label>
+
+          <label class="upload-card">
+            <span class="upload-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M5 4h14v16H5z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>
+            </span>
+            <span class="upload-title">Product Listing</span>
+            <span class="upload-copy">Detected Columns: {{ result.product_info.columns if result else 'Auto' }}</span>
+            <input type="file" name="product_listing" accept=".csv,.xlsx,.xls" required>
+          </label>
+        </div>
+
+        <details class="advanced">
+          <summary>Sheet overrides</summary>
+          <div class="override-grid">
+            <label>Content sheet <input type="text" name="content_sheet" placeholder="Auto detect"></label>
+            <label>GS1 sheet <input type="text" name="gs1_sheet" placeholder="Auto detect"></label>
+            <label>Dropbox sheet <input type="text" name="dropbox_sheet" placeholder="Auto detect"></label>
+          </div>
+        </details>
+
+        <button class="run-button" type="submit">
+          <span>Run Full Pipeline</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+        </button>
+        <div class="upload-progress" hidden>
+          <strong>Uploading to Vercel Blob</strong>
+          <span data-progress-text>Preparing files...</span>
+        </div>
+      </form>
+
+      {% if result %}
+      <section class="result-block" aria-live="polite">
+        <div class="validation-band">
+          <div>
+            <span class="band-label">Detected Sheet</span>
+            <strong>{{ result.content_info.sheet_name }} / {{ result.gs1_info.sheet_name }} / {{ result.image_stats.selected_sheet }}</strong>
+          </div>
+          <div>
+            <span class="band-label">SKU Matches</span>
+            <strong>{{ result.fill_stats.cm_matches }} CM / {{ result.fill_stats.gs1_matches }} GS1</strong>
+          </div>
+          <div>
+            <span class="band-label">Missing Images</span>
+            <strong>{{ result.image_stats.missing_image_skus|length }}</strong>
+          </div>
+          <div>
+            <span class="band-label">Final Rows</span>
+            <strong>{{ result.image_stats.result_rows }}</strong>
+          </div>
+        </div>
+
+        <div class="preview-head">
+          <div>
+            <h2>Preview</h2>
+            <p>First 25 generated Shopify rows.</p>
+          </div>
+          <div class="download-actions">
+            <a class="button button-yellow" href="{{ result.blob_downloads.csv if result.blob_downloads and result.blob_downloads.csv else url_for('download', job_id=result.job_id, filename=result.downloads.csv) }}">Download Shopify CSV</a>
+            <a class="button" href="{{ result.blob_downloads.excel if result.blob_downloads and result.blob_downloads.excel else url_for('download', job_id=result.job_id, filename=result.downloads.excel) }}">Download Excel Backup</a>
+            <a class="button button-cyan" href="{{ result.blob_downloads.report if result.blob_downloads and result.blob_downloads.report else url_for('download', job_id=result.job_id, filename=result.downloads.report) }}">Download Report</a>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          {{ result.preview_html|safe }}
+        </div>
+      </section>
+      {% endif %}
+    </section>
+
+    <aside class="summary-panel">
+      <div class="panel-title">Run Controls</div>
+      <div class="metric-grid">
+        <div class="metric-card">
+          <span>Required files</span>
+          <strong>4</strong>
+        </div>
+        <div class="metric-card accent-cyan">
+          <span>Image rows</span>
+          <strong>Live</strong>
+        </div>
+        <div class="metric-card accent-coral">
+          <span>Output files</span>
+          <strong>3</strong>
+        </div>
+        <div class="metric-card accent-cyan">
+          <span>Upload mode</span>
+          <strong>{{ 'Blob' if blob_uploads_enabled else 'Local' }}</strong>
+        </div>
+      </div>
+
+      {% if result %}
+      <div class="audit-list">
+        <h2>Run Summary</h2>
+        <p><strong>Content rows:</strong> {{ result.content_info.rows }}</p>
+        <p><strong>Product rows:</strong> {{ result.fill_stats.total_rows }}</p>
+        <p><strong>Rows with SKU:</strong> {{ result.fill_stats.rows_with_sku }}</p>
+        <p><strong>Images written:</strong> {{ result.image_stats.image_urls_written }}</p>
+        <p><strong>GS1 header row:</strong> {{ result.gs1_info.header_row }}</p>
+      </div>
+
+      {% set warnings = result.fill_stats.warnings + result.image_stats.warnings + result.content_info.warnings + result.gs1_info.warnings + result.product_info.warnings %}
+      {% if warnings %}
+      <div class="warning-box">
+        <h2>Column Warnings</h2>
+        {% for warning in warnings[:8] %}
+        <p>{{ warning }}</p>
+        {% endfor %}
+        {% if warnings|length > 8 %}
+        <p>{{ warnings|length - 8 }} more in report.</p>
+        {% endif %}
+      </div>
+      {% endif %}
+      {% else %}
+      <div class="audit-list">
+        <h2>Ready State</h2>
+        <p>Auto-detect is active for sheets and headers.</p>
+      </div>
+      {% endif %}
+    </aside>
+  </main>
+
+  <script type="module" src="{{ url_for('static_asset', filename='app.js') }}"></script>
+</body>
+</html>
