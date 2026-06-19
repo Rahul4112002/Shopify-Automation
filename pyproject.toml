@@ -1,9 +1,14 @@
-[project]
-name = "shopify-product-listing-automation"
+
 version = "1.0.0"
 description = "Flask and Pandas app for preparing Shopify import-ready product listings."
 requires-python = ">=3.12,<3.13"
+dependencies = [
+    "Flask>=3.0.0",
+    "pandas>=2.0.0",
+    "openpyxl>=3.1.0",
+    "pyxlsb>=1.0.10",
+    "vercel",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
