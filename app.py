@@ -52,17 +52,26 @@ INSTANCE_PATH = (
 )
 
 
+def ensure_directory(path: Path) -> Path:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+    except OSError:
+        fallback = Path(tempfile.gettempdir()) / path.name
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+
+
 app = Flask(
     __name__,
     instance_relative_config=True,
-    instance_path=str(INSTANCE_PATH),
+    instance_path=str(ensure_directory(INSTANCE_PATH)),
     static_folder=None,
 )
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY") or (
     uuid.uuid4().hex if IS_VERCEL else "local-dev-secret-key"
 )
-Path(app.instance_path).mkdir(parents=True, exist_ok=True)
 
 
 def job_root() -> Path:
@@ -73,8 +82,7 @@ def job_root() -> Path:
         root = Path(tempfile.gettempdir()) / "shopify-listing-jobs"
     else:
         root = Path(app.instance_path) / "jobs"
-    root.mkdir(parents=True, exist_ok=True)
-    return root
+    return ensure_directory(root)
 
 
 def cleanup_old_jobs() -> None:
