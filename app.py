@@ -21,9 +21,24 @@ from processors import run_pipeline
 BASE_DIR = Path(__file__).resolve().parent
 ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".xls", ".xlsb"}
 IS_VERCEL = os.environ.get("VERCEL") == "1"
+IS_SERVERLESS = IS_VERCEL or bool(
+    os.environ.get("AWS_LAMBDA_FUNCTION_NAME") or os.environ.get("LAMBDA_TASK_ROOT")
+)
 DEFAULT_MAX_UPLOAD_MB = 4 if IS_VERCEL else 200
-MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", DEFAULT_MAX_UPLOAD_MB))
-JOB_TTL_SECONDS = int(os.environ.get("JOB_TTL_SECONDS", 2 * 60 * 60))
+
+
+def int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+MAX_UPLOAD_MB = int_env("MAX_UPLOAD_MB", DEFAULT_MAX_UPLOAD_MB)
+JOB_TTL_SECONDS = int_env("JOB_TTL_SECONDS", 2 * 60 * 60)
 BLOB_UPLOAD_FIELDS = {
     "content_master": {"extensions": {".xlsx", ".xls"}},
     "gs1": {"extensions": {".xlsx", ".xls", ".xlsb"}},
@@ -32,7 +47,7 @@ BLOB_UPLOAD_FIELDS = {
 }
 INSTANCE_PATH = (
     Path(tempfile.gettempdir()) / "shopify-listing-instance"
-    if IS_VERCEL
+    if IS_SERVERLESS
     else BASE_DIR / "instance"
 )
 
@@ -54,7 +69,7 @@ def job_root() -> Path:
     configured = os.environ.get("SHOPIFY_JOB_ROOT")
     if configured:
         root = Path(configured)
-    elif IS_VERCEL:
+    elif IS_SERVERLESS:
         root = Path(tempfile.gettempdir()) / "shopify-listing-jobs"
     else:
         root = Path(app.instance_path) / "jobs"
