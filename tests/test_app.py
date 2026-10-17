@@ -108,22 +108,18 @@ class FakeBlobClient:
     def __init__(self):
         self.calls = []
 
-    def download_file(self, url, path, access="public", timeout=None):
+    def download_to(self, url, path, access="public"):
         self.calls.append(("download_file", url, access))
         Path(path).write_bytes(b"data")
-        return str(path)
+        return Path(path)
 
-    def put(self, path, body, access="public", content_type=None, overwrite=False):
+    def put(self, path, body, access="public", content_type=None):
         self.calls.append(("put", path, access))
         return {"url": f"https://store.{access}.blob.vercel-storage.com/{path}"}
 
-    def get(self, path, access="public"):
+    def read(self, path, access="public"):
         self.calls.append(("get", path, access))
-
-        class Result:
-            content = b"SKU,Title\nA,B\n"
-
-        return Result()
+        return b"SKU,Title\nA,B\n"
 
 
 def test_private_blob_store_is_used_for_uploads_and_downloads(client, tmp_path, monkeypatch):

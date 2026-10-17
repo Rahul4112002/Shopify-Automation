@@ -35,6 +35,7 @@ def load_local_env(path: Path = BASE_DIR / ".env") -> None:
 
 load_local_env()
 
+from blob_store import BlobStore  # noqa: E402
 from ai_titles import build_title_generator, configured_models, gemini_api_key  # noqa: E402
 from catalog_rules import STORES, get_store  # noqa: E402
 from processors import BARCODE_COLUMNS, run_pipeline  # noqa: E402
@@ -264,12 +265,8 @@ def blob_access() -> str:
     return "public" if os.environ.get("BLOB_ACCESS", "").strip().lower() == "public" else "private"
 
 
-def blob_client():
-    try:
-        from vercel.blob import BlobClient
-    except ImportError as exc:
-        raise RuntimeError("The Python package 'vercel' is required for Vercel Blob uploads.") from exc
-    return BlobClient(token=blob_read_write_token())
+def blob_client() -> BlobStore:
+    return BlobStore(blob_read_write_token() or "")
 
 
 def validate_blob_url(url: str) -> None:
@@ -317,7 +314,7 @@ def download_blob_upload(job_dir: Path, field_name: str, upload_info: dict | Non
     upload_dir.mkdir(parents=True, exist_ok=True)
     path = upload_dir / f"{field_name}{suffix}"
     # The SDK adds the store token, which private stores require.
-    blob_client().download_file(url, path, access=blob_access(), timeout=120)
+    blob_client().download_to(url, path, access=blob_access())
     return path
 
 
@@ -354,7 +351,6 @@ def upload_outputs_to_blob(output_dir: Path, downloads: dict, job_id: str) -> di
             path.read_bytes(),
             access=access,
             content_type=content_type,
-            overwrite=True,
         )
         if access == "public":
             uploaded[key] = blob_result_value(blob, "download_url", "downloadUrl", "url")
@@ -645,13 +641,13 @@ def download(job_id: str, filename: str):
     if not blob_uploads_enabled():
         abort(404)
     try:
-        blob = blob_client().get(f"{BLOB_OUTPUT_PREFIX}/{job_id}/{safe_name}", access=blob_access())
+        content = blob_client().read(f"{BLOB_OUTPUT_PREFIX}/{job_id}/{safe_name}", access=blob_access())
     except Exception:
         app.logger.warning("Output %s/%s not found in Blob.", job_id, safe_name, exc_info=True)
         abort(404)
     content_type = mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
     return Response(
-        blob.content,
+        content,
         mimetype=content_type,
         headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
     )
