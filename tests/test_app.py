@@ -1,4 +1,5 @@
 import io
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -101,3 +102,67 @@ def test_missing_required_file_shows_error(client):
     response = client.post("/store/lavie/process", data=data, content_type="multipart/form-data")
     assert response.status_code == 400
     assert "Please upload the GS sheet file." in response.get_data(as_text=True)
+
+
+class FakeBlobClient:
+    def __init__(self):
+        self.calls = []
+
+    def download_file(self, url, path, access="public", timeout=None):
+        self.calls.append(("download_file", url, access))
+        Path(path).write_bytes(b"data")
+        return str(path)
+
+    def put(self, path, body, access="public", content_type=None, overwrite=False):
+        self.calls.append(("put", path, access))
+        return {"url": f"https://store.{access}.blob.vercel-storage.com/{path}"}
+
+    def get(self, path, access="public"):
+        self.calls.append(("get", path, access))
+
+        class Result:
+            content = b"SKU,Title\nA,B\n"
+
+        return Result()
+
+
+def test_private_blob_store_is_used_for_uploads_and_downloads(client, tmp_path, monkeypatch):
+    fake = FakeBlobClient()
+    monkeypatch.setattr(app_module, "blob_client", lambda: fake)
+    monkeypatch.setattr(app_module, "blob_uploads_enabled", lambda: True)
+    monkeypatch.delenv("BLOB_ACCESS", raising=False)
+
+    path = app_module.download_blob_upload(
+        tmp_path,
+        "product_listing",
+        {"url": "https://abc.private.blob.vercel-storage.com/x/products.csv", "filename": "products.csv"},
+    )
+    assert path.read_bytes() == b"data"
+    assert fake.calls[-1] == ("download_file", "https://abc.private.blob.vercel-storage.com/x/products.csv", "private")
+
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "lavie_shopify_import_ready.csv").write_text("x")
+    links = app_module.upload_outputs_to_blob(out, {"csv": "lavie_shopify_import_ready.csv"}, "job123")
+    assert links == {}  # private store: links go through /download
+    assert fake.calls[-1] == ("put", "shopify-listing/outputs/job123/lavie_shopify_import_ready.csv", "private")
+
+    response = client.get("/download/job123/lavie_shopify_import_ready.csv")
+    assert response.status_code == 200
+    assert response.data == b"SKU,Title\nA,B\n"
+    assert "attachment" in response.headers["Content-Disposition"]
+    assert fake.calls[-1] == ("get", "shopify-listing/outputs/job123/lavie_shopify_import_ready.csv", "private")
+
+
+def test_public_blob_store_returns_direct_links(tmp_path, monkeypatch):
+    fake = FakeBlobClient()
+    monkeypatch.setattr(app_module, "blob_client", lambda: fake)
+    monkeypatch.setattr(app_module, "blob_uploads_enabled", lambda: True)
+    monkeypatch.setenv("BLOB_ACCESS", "public")
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "a.csv").write_text("x")
+
+    links = app_module.upload_outputs_to_blob(out, {"csv": "a.csv"}, "job1")
+
+    assert links["csv"].startswith("https://store.public.blob")

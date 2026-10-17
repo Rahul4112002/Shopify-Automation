@@ -9,9 +9,8 @@ import time
 import uuid
 from pathlib import Path
 from urllib.parse import urlparse
-from urllib.request import urlopen
 
-from flask import Flask, abort, redirect, render_template, request, send_from_directory, url_for
+from flask import Flask, Response, abort, redirect, render_template, request, send_from_directory, url_for
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
@@ -257,6 +256,22 @@ def blob_uploads_enabled() -> bool:
     )
 
 
+BLOB_OUTPUT_PREFIX = "shopify-listing/outputs"
+
+
+def blob_access() -> str:
+    """Access mode of the connected Blob store. Private by default; set BLOB_ACCESS=public for a public store."""
+    return "public" if os.environ.get("BLOB_ACCESS", "").strip().lower() == "public" else "private"
+
+
+def blob_client():
+    try:
+        from vercel.blob import BlobClient
+    except ImportError as exc:
+        raise RuntimeError("The Python package 'vercel' is required for Vercel Blob uploads.") from exc
+    return BlobClient(token=blob_read_write_token())
+
+
 def validate_blob_url(url: str) -> None:
     parsed = urlparse(url)
     if parsed.scheme != "https" or not parsed.netloc.endswith(".blob.vercel-storage.com"):
@@ -295,15 +310,14 @@ def download_blob_upload(job_dir: Path, field_name: str, upload_info: dict | Non
         return None
     filename = secure_filename(str(upload_info.get("filename") or upload_info.get("pathname") or ""))
     suffix = validate_extension(filename, field_name)
-    url = str(upload_info.get("downloadUrl") or upload_info.get("download_url") or upload_info.get("url") or "")
+    url = str(upload_info.get("url") or upload_info.get("downloadUrl") or upload_info.get("download_url") or "")
     validate_blob_url(url)
 
     upload_dir = job_dir / "uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
     path = upload_dir / f"{field_name}{suffix}"
-    with urlopen(url, timeout=120) as response:
-        with path.open("wb") as destination:
-            shutil.copyfileobj(response, destination)
+    # The SDK adds the store token, which private stores require.
+    blob_client().download_file(url, path, access=blob_access(), timeout=120)
     return path
 
 
@@ -321,27 +335,29 @@ def blob_result_value(result, *names: str) -> str:
 
 
 def upload_outputs_to_blob(output_dir: Path, downloads: dict, job_id: str) -> dict:
+    """Store outputs in Blob so any serverless instance can serve them.
+
+    Returns direct links for a public store. For a private store it returns {} and the
+    /download route streams the file from Blob with the store token.
+    """
     if not blob_uploads_enabled():
         return {}
 
-    try:
-        from vercel.blob import BlobClient
-    except ImportError as exc:
-        raise RuntimeError("The Python package 'vercel' is required for Blob output uploads.") from exc
-
-    client = BlobClient(token=blob_read_write_token())
+    client = blob_client()
+    access = blob_access()
     uploaded = {}
     for key, filename in downloads.items():
         path = output_dir / filename
         content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         blob = client.put(
-            f"shopify-listing/outputs/{job_id}/{path.name}",
+            f"{BLOB_OUTPUT_PREFIX}/{job_id}/{path.name}",
             path.read_bytes(),
-            access="public",
+            access=access,
             content_type=content_type,
             overwrite=True,
         )
-        uploaded[key] = blob_result_value(blob, "download_url", "downloadUrl", "url")
+        if access == "public":
+            uploaded[key] = blob_result_value(blob, "download_url", "downloadUrl", "url")
     return uploaded
 
 
@@ -356,9 +372,7 @@ def delete_blob_uploads(blob_uploads: dict) -> None:
         return
 
     try:
-        from vercel.blob import BlobClient
-
-        BlobClient(token=blob_read_write_token()).delete(urls)
+        blob_client().delete(urls)
     except Exception:
         app.logger.warning("Could not delete temporary input Blob uploads.", exc_info=True)
 
@@ -457,6 +471,7 @@ def render_store(store, *, result=None, error=None, status=200):
             upload_limit_mb=MAX_UPLOAD_MB,
             is_vercel=IS_VERCEL,
             blob_uploads_enabled=blob_uploads_enabled(),
+            blob_access=blob_access(),
         ),
         status,
     )
@@ -604,9 +619,23 @@ def download(job_id: str, filename: str):
         abort(404)
     safe_name = secure_filename(filename)
     directory = job_root() / job_id / "outputs"
-    if not (directory / safe_name).exists():
+    if (directory / safe_name).exists():
+        return send_from_directory(directory, safe_name, as_attachment=True)
+
+    # Serverless: the request may land on another instance, so fetch the copy kept in Blob.
+    if not blob_uploads_enabled():
         abort(404)
-    return send_from_directory(directory, safe_name, as_attachment=True)
+    try:
+        blob = blob_client().get(f"{BLOB_OUTPUT_PREFIX}/{job_id}/{safe_name}", access=blob_access())
+    except Exception:
+        app.logger.warning("Output %s/%s not found in Blob.", job_id, safe_name, exc_info=True)
+        abort(404)
+    content_type = mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
+    return Response(
+        blob.content,
+        mimetype=content_type,
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+    )
 
 
 if __name__ == "__main__":

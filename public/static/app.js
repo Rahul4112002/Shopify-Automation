@@ -161,13 +161,38 @@ async function uploadFilesToBlob(formEl, inputs) {
   for (let index = 0; index < selected.length; index += 1) {
     const input = selected[index];
     const file = validateFile(input);
-    setBusy(true, `Uploading ${labelFor(input)} (${index + 1} of ${selected.length})…`);
+    const label = `Uploading ${labelFor(input)} (${index + 1} of ${selected.length})`;
+    setBusy(true, `${label}…`);
 
-    const blob = await upload(`shopify-listing/input/${jobId}/${input.name}-${file.name}`, file, {
-      access: "public",
-      handleUploadUrl: formEl.dataset.blobUploadUrl || "/api/blob-upload",
-      clientPayload: JSON.stringify({ field: input.name, jobId, filename: file.name }),
-    });
+    // The Blob client retries failed uploads silently; abort if nothing moves for 90 seconds.
+    const controller = new AbortController();
+    let lastProgress = Date.now();
+    const stallTimer = setInterval(() => {
+      if (Date.now() - lastProgress > 90_000) controller.abort();
+    }, 5_000);
+
+    let blob;
+    try {
+      blob = await upload(`shopify-listing/input/${jobId}/${input.name}-${file.name}`, file, {
+        access: formEl.dataset.blobAccess === "public" ? "public" : "private",
+        handleUploadUrl: formEl.dataset.blobUploadUrl || "/api/blob-upload",
+        clientPayload: JSON.stringify({ field: input.name, jobId, filename: file.name }),
+        abortSignal: controller.signal,
+        onUploadProgress: ({ percentage }) => {
+          lastProgress = Date.now();
+          setBusy(true, `${label}… ${Math.round(percentage || 0)}%`);
+        },
+      });
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw new Error(
+          `Uploading ${labelFor(input)} stalled. Check the internet connection and the Vercel Blob store settings, then try again.`
+        );
+      }
+      throw new Error(`Uploading ${labelFor(input)} failed: ${error.message || error}`);
+    } finally {
+      clearInterval(stallTimer);
+    }
 
     uploads[input.name] = {
       url: blob.url,
