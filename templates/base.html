@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Listing Studio{% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static_asset', filename='styles.css') }}">
+</head>
+<body class="{% block body_class %}{% endblock %}">
+  <header class="app-header">
+    <div class="app-header__inner">
+      <a class="brand" href="{{ url_for('index') }}">
+        <span class="brand__mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M6 7h12l-1 13H7L6 7Z"/><path d="M9 7a3 3 0 0 1 6 0"/></svg>
+        </span>
+        <span class="brand__text">
+          <strong>Listing Studio</strong>
+          <small>Shopify product listing automation</small>
+        </span>
+      </a>
+      <nav class="app-nav" aria-label="Stores">
+        <a href="{{ url_for('store_page', store_key='lavie') }}" class="{{ 'is-active' if active_store == 'lavie' }}">LAVIE</a>
+        <a href="{{ url_for('store_page', store_key='akiki') }}" class="{{ 'is-active' if active_store == 'akiki' }}">AKIKI LONDON</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="page">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="app-footer">
+    <span>Outputs: Shopify import CSV, Excel backup and a QA report.</span>
+    <span>Always cross-check EAN codes, tags, titles and types before importing.</span>
+  </footer>
+
+  {% block scripts %}{% endblock %}
+</body>
+</html>

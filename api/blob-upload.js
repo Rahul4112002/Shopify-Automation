@@ -3,7 +3,7 @@ import { handleUpload } from "@vercel/blob/client";
 const ALLOWED_EXTENSIONS = {
   content_master: [".xlsx", ".xls"],
   gs1: [".xlsx", ".xls", ".xlsb"],
-  dropbox_links: [".xlsx", ".xls"],
+  dropbox_links: [".xlsx", ".xls", ".csv"],
   product_listing: [".csv", ".xlsx", ".xls"],
 };
 
@@ -20,12 +20,22 @@ function parsePayload(payload) {
   }
 }
 
+function blobReadWriteToken() {
+  return process.env.BLOB_READ_WRITE_TOKEN || process.env.BLOB_READ_WRITE_TOKEN_READ_WRITE_TOKEN;
+}
+
 export async function POST(request) {
   try {
+    const token = blobReadWriteToken();
+    if (!token) {
+      throw new Error("Missing Vercel Blob read-write token.");
+    }
+
     const body = await request.json();
     const response = await handleUpload({
       body,
       request,
+      token,
       onBeforeGenerateToken: async (pathname, clientPayload) => {
         const payload = parsePayload(clientPayload);
         const field = payload.field;

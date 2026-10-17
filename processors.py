@@ -4,10 +4,24 @@ import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import pandas as pd
+
+from catalog_rules import (
+    StoreConfig,
+    clean_ai_name,
+    clean_text,
+    compose_title,
+    derive_style_name,
+    get_store,
+    normalize_color,
+    normalize_product_type,
+    normalize_size,
+    smart_title,
+    style_group_key,
+)
 
 
 CONTENT_GENERATED_COLUMNS = [
@@ -385,10 +399,25 @@ def score_sheet_columns(columns: Iterable[Any]) -> int:
     score += 5 if "article" in cols else 0
     score += 3 if "ean/upc" in cols else 0
     score += 3 if "new mrp" in cols else 0
-    score += 2 if "size" in cols or "size " in cols else 0
+    score += 2 if "size" in cols else 0
     score += 2 if "country" in cols else 0
-    score -= sum(1 for col in cols if col.startswith("unnamed"))
+    score += 1 if "family" in cols else 0
+    score += 1 if "colour" in cols or "color" in cols else 0
+    # A single leading blank column is normal in the GS1 master; only punish wider gaps.
+    unnamed = sum(1 for col in cols if col.startswith("unnamed") or col in {"", "nan", "none"})
+    score -= max(0, unnamed - 2)
     return score
+
+
+def score_sheet_name(sheet: str) -> int:
+    name = normalize_name(sheet)
+    if name in {"master", "master sheet", "gs1 master", "gs master"}:
+        return 6
+    if any(word in name for word in ("discontinued", "blocked", "map ", "kitting", "non merchandise")):
+        return -6
+    if "master" in name:
+        return 2
+    return 0
 
 
 def detect_gs1_sheet_and_header(
@@ -396,40 +425,26 @@ def detect_gs1_sheet_and_header(
     requested_sheet: str | None = None,
 ) -> tuple[str, int]:
     xls = get_excel_file(path)
-    if requested_sheet:
-        candidate_sheets = [requested_sheet]
-    else:
-        preferred = [
-            sheet
-            for sheet in xls.sheet_names
-            if normalize_name(sheet) in {"master", "master sheet"}
-        ]
-        contains_master = [
-            sheet
-            for sheet in xls.sheet_names
-            if "master" in normalize_name(sheet) and sheet not in preferred
-        ]
-        others = [
-            sheet
-            for sheet in xls.sheet_names
-            if sheet not in preferred and sheet not in contains_master
-        ]
-        candidate_sheets = preferred + contains_master + others
+    candidate_sheets = [requested_sheet] if requested_sheet else list(xls.sheet_names)
 
     best_sheet = candidate_sheets[0]
     best_header = 0
     best_score = -999
     for sheet in candidate_sheets:
-        for header_row in range(4):
-            try:
-                sample = read_excel_file(path, sheet_name=sheet, header=header_row, nrows=5)
-                score = score_sheet_columns(sample.columns)
-                if score > best_score:
-                    best_sheet = sheet
-                    best_header = header_row
-                    best_score = score
-            except Exception:
+        try:
+            # Read each sheet once and score the first rows as possible header rows.
+            sample = read_excel_file(path, sheet_name=sheet, header=None, nrows=6)
+        except Exception:
+            continue
+        for header_row in range(min(4, len(sample))):
+            score = score_sheet_columns(sample.iloc[header_row].tolist())
+            if score <= 0:
                 continue
+            score += score_sheet_name(sheet)
+            if score > best_score:
+                best_sheet = sheet
+                best_header = header_row
+                best_score = score
     return best_sheet, best_header
 
 
@@ -448,17 +463,15 @@ def load_gs1(
         warnings=[],
     )
     if resolve_column(df.columns, "Article") is None:
-        info.warnings.append("GS1 file does not contain an Article column after auto-detection.")
+        info.warnings.append("GS file does not contain an Article column after auto-detection.")
+    if resolve_column(df.columns, ["EAN/UPC", "EAN Code", "EAN"]) is None:
+        info.warnings.append("GS file does not contain an EAN/UPC column; barcodes will be blank.")
     return df, info
 
 
 def format_size(size_value: Any) -> Any:
-    if is_blank(size_value):
-        return None
-    size_text = str(size_value).strip().title()
-    if size_text.lower() == "x-large":
-        return "Extra Large"
-    return size_text
+    size = normalize_size(size_value)
+    return size or None
 
 
 def format_dimension(dim_value: Any) -> Any:
@@ -523,8 +536,11 @@ def remove_vendor_from_title(title: Any, vendor: Any = None) -> Any:
 
 
 def format_identifier(value: Any) -> Any:
+    """Return barcodes / EANs as plain digits: no '.0', no scientific notation, no apostrophe."""
     if is_blank(value):
         return None
+    if isinstance(value, bool):
+        return str(value)
     if isinstance(value, int):
         return str(value)
     if isinstance(value, float):
@@ -532,7 +548,7 @@ def format_identifier(value: Any) -> Any:
             return str(int(value))
         return format(value, "f").rstrip("0").rstrip(".")
 
-    text = str(value).strip().replace(",", "")
+    text = str(value).strip().lstrip("'").replace(",", "").replace(" ", "")
     if re.fullmatch(r"\d+", text):
         return text
     if re.fullmatch(r"\d+\.0+", text):
@@ -546,6 +562,19 @@ def format_identifier(value: Any) -> Any:
     return format(decimal_value.normalize(), "f")
 
 
+def format_price(value: Any) -> Any:
+    if is_blank(value):
+        return None
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    text = str(value).strip().replace(",", "")
+    if re.fullmatch(r"\d+\.0+", text):
+        return int(text.split(".", 1)[0])
+    if re.fullmatch(r"\d+", text):
+        return int(text)
+    return value
+
+
 def slugify_part(value: Any) -> str:
     if is_blank(value):
         return ""
@@ -556,8 +585,14 @@ def slugify_part(value: Any) -> str:
     return text.strip("-")
 
 
-def make_handle(vendor: Any, title: Any, size: Any, color: Any) -> str:
-    parts = [slugify_part(part) for part in [vendor, title, size, color]]
+def make_handle(vendor: Any, title: Any, size: Any = None, color: Any = None) -> str:
+    """vendor-title, adding size / colour only when the title does not already contain them."""
+    title_slug = slugify_part(title)
+    parts = [slugify_part(vendor), title_slug]
+    for extra in (size, color):
+        extra_slug = slugify_part(extra)
+        if extra_slug and f"-{extra_slug}-" not in f"-{title_slug}-":
+            parts.append(extra_slug)
     handle = "-".join(part for part in parts if part)
     return handle or "product"
 
@@ -570,37 +605,239 @@ def unique_handle(base_handle: str, handle_counts: dict[str, int]) -> str:
     return f"{base_handle}-{count}"
 
 
-def seo_title(title: Any) -> Any:
+def seo_title(title: Any, store_name: str = "Lavie World") -> Any:
     if is_blank(title):
         return None
-    return f"Buy {str(title).strip()} Online - Lavie World"
+    return f"Buy {str(title).strip()} Online - {store_name}"
 
 
-def image_alt_text(title: Any, color: Any) -> Any:
+def image_alt_text(title: Any) -> Any:
+    """Image alt text is exactly the product title (both stores)."""
     if is_blank(title):
         return None
-    if is_blank(color):
-        return str(title).strip()
-    return f"{str(title).strip()} {str(color).strip().title()}"
+    return str(title).strip()
 
 
-def build_lookup(df: pd.DataFrame, key_alias: str) -> dict[str, pd.Series]:
+def build_lookup(df: pd.DataFrame, key_alias: str | Iterable[str]) -> dict[str, pd.Series]:
     key_col = resolve_column(df.columns, key_alias)
     if key_col is None:
         return {}
     lookup: dict[str, pd.Series] = {}
     for _, row in df.iterrows():
-        key = normalize_sku(row.get(key_col))
+        key = normalize_sku(row.get(key_col)).upper()
         if key and key not in lookup:
             lookup[key] = row
     return lookup
+
+
+BARCODE_COLUMNS = ["Variant Barcode", "Variant Barcodes"]
+MPN_COLUMN = "Google Shopping / MPN"
+BADGE_COLUMN = "Badges (product.metafields.custom.badges)"
+BADGE_VALUE = "New"
+
+METAFIELD_MAPPINGS = {
+    "Closure Type (product.metafields.custom.closure_type)": "Closure type",
+    "Compartments (product.metafields.custom.compartments)": "No. of Compartments",
+    "External Pockets (product.metafields.custom.external_pockets)": "External Pockets",
+    "Internal Pockets (product.metafields.custom.internal_pockets)": "Internal Pockets",
+    "Laptop Compartment (product.metafields.custom.laptop_compartment)": "Laptop Compartment",
+    "Lining Type (product.metafields.custom.lining_type)": "Lining Type",
+    "Material (product.metafields.custom.material)": "Material",
+    "Occasion (product.metafields.custom.occasion)": "Occasion",
+    "Pattern (product.metafields.custom.pattern)": "Pattern",
+    "Strap Type (product.metafields.custom.strap_type)": "Strap Type",
+    "Water Resistant (product.metafields.custom.water_resistant)": "Water Resistant",
+    "Care Instruction (product.metafields.my_fields.care_instruction)": "Care Instruction",
+    "product deacription (product.metafields.my_fields.product_description)": "Product Description",
+}
+
+
+def set_first_present(
+    df: pd.DataFrame,
+    index: Any,
+    targets: list[str],
+    value: Any,
+    warnings: set[str],
+) -> None:
+    for target in targets:
+        col = resolve_column(df.columns, target)
+        if col is not None:
+            if not is_blank(value):
+                df.at[index, col] = value
+            return
+    warnings.add(f"Target column missing in Product Listing: {' / '.join(targets)}")
+
+
+def build_row_context(
+    sku: str,
+    cm_data: pd.Series | None,
+    gs1_data: pd.Series | None,
+    store: StoreConfig,
+) -> dict[str, Any]:
+    def cm(aliases: str | Iterable[str]) -> Any:
+        return get_value(cm_data, aliases) if cm_data is not None else None
+
+    def gs1(aliases: str | Iterable[str]) -> Any:
+        return get_value(gs1_data, aliases) if gs1_data is not None else None
+
+    size = normalize_size(gs1("Size")) or normalize_size(cm("Size"))
+    gs_color_raw = gs1(["Colour", "Color"])
+    cm_color_raw = cm(["Colour", "Color"])
+    color = normalize_color(gs_color_raw) or normalize_color(cm_color_raw)
+    raw_subcategory = clean_text(cm("Subcategory"))
+    product_type, type_method = normalize_product_type(raw_subcategory, cm("Product Category"))
+
+    brand = clean_text(cm("Brand Name")) or clean_text(gs1(["BRAND", "Brand"]))
+    if store.vendor_override:
+        vendor = store.vendor_override
+    else:
+        vendor = brand.title() if brand else ""
+
+    country = clean_text(gs1(["Country", "Country of Origin"]))
+    return {
+        "sku": sku,
+        "variant_sku": clean_text(cm("BZ CODE")) or sku,
+        "brand": brand,
+        "vendor": vendor,
+        "size": size,
+        "color": color,
+        "color_source": "GS" if normalize_color(gs_color_raw) else ("Content Master" if color else ""),
+        "raw_color": clean_text(gs_color_raw) or clean_text(cm_color_raw),
+        "product_type": product_type,
+        "type_method": type_method,
+        "raw_subcategory": raw_subcategory,
+        "product_title": clean_text(cm("Product Title")) or clean_text(cm(["Final Product Title", "Title"])),
+        "bz_description": clean_text(cm("BZ Description")) or clean_text(gs1("Article description in SAP")),
+        "style_name": clean_text(cm("Product Style Name")),
+        "family": clean_text(gs1("Family")) or clean_text(gs1("New Family")),
+        "country": country.title() if country else "",
+        "barcode": format_identifier(gs1(["EAN/UPC", "EAN Code", "EAN"])),
+        "price": format_price(gs1("NEW MRP")),
+        "dimension": format_dimension(gs1(["System Dimension", "Dimension"])),
+        "cm": cm,
+    }
+
+
+def fallback_name(ctx: dict[str, Any]) -> str:
+    return derive_style_name(
+        product_title=ctx["product_title"],
+        bz_description=ctx["bz_description"],
+        style_name=ctx["style_name"] or ctx["family"],
+        brand=ctx["brand"],
+        color=ctx["color"],
+        size=ctx["size"],
+        product_type=ctx["product_type"],
+        raw_color=ctx["raw_color"],
+    )
+
+
+def generate_titles(
+    contexts: list[dict[str, Any]],
+    store: StoreConfig,
+    title_generator: Callable[[list[dict[str, Any]]], dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    """Fill ctx['name'], ctx['title'] and ctx['title_source'] for every context."""
+    info: dict[str, Any] = {
+        "strategy": store.title_strategy,
+        "ai_enabled": bool(title_generator) and store.title_strategy == "ai",
+        "styles": 0,
+        "ai_titles": 0,
+        "rule_titles": 0,
+        "family_titles": 0,
+        "model": None,
+        "errors": [],
+        "warnings": [],
+    }
+    if not contexts:
+        return info
+
+    if store.title_strategy == "family":
+        for ctx in contexts:
+            family = smart_title(ctx["family"])
+            if family:
+                ctx["name"], ctx["title_source"] = family, "Family (GS)"
+                info["family_titles"] += 1
+            else:
+                ctx["name"], ctx["title_source"] = fallback_name(ctx), "Rule (no Family in GS)"
+                info["rule_titles"] += 1
+            ctx["title"] = compose_title(ctx["name"], ctx["size"], ctx["color"], ctx["product_type"])
+        missing = [ctx["sku"] for ctx in contexts if ctx["title_source"].startswith("Rule")]
+        if missing:
+            info["warnings"].append(
+                f"{len(missing)} SKU(s) have no Family in the GS sheet; their title name was built from the Content Master."
+            )
+        return info
+
+    # LAVIE: one AI request item per style, so every colour of a style gets the same name.
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for ctx in contexts:
+        key = style_group_key(ctx["product_title"], ctx["bz_description"], ctx["style_name"], ctx["product_type"])
+        groups.setdefault(key, []).append(ctx)
+    info["styles"] = len(groups)
+
+    items: list[dict[str, Any]] = []
+    ids: dict[str, list[dict[str, Any]]] = {}
+    for index, members in enumerate(groups.values(), start=1):
+        first = members[0]
+        style_id = f"s{index}"
+        ids[style_id] = members
+        items.append(
+            {
+                "id": style_id,
+                "product_title": first["product_title"],
+                "sap_description": first["bz_description"],
+                "style_name": first["style_name"],
+                "family": first["family"],
+                "brand": first["brand"],
+                "type": first["product_type"],
+                "sizes": sorted({m["size"] for m in members if m["size"]}),
+                "colours": sorted({m["color"] for m in members if m["color"]}),
+            }
+        )
+
+    ai_names: dict[str, str] = {}
+    if info["ai_enabled"]:
+        try:
+            ai_names = title_generator(items) or {}
+        except Exception as exc:  # noqa: BLE001 - fall back to rule-based names
+            info["errors"].append(str(exc))
+        describe = getattr(title_generator, "describe", None)
+        if callable(describe):
+            details = describe()
+            info["model"] = details.get("model")
+            info["errors"].extend(details.get("errors", []))
+
+    for style_id, members in ids.items():
+        ai_name = clean_ai_name(ai_names.get(style_id), members[0]["brand"])
+        for ctx in members:
+            if ai_name:
+                ctx["name"], ctx["title_source"] = ai_name, "AI"
+                info["ai_titles"] += 1
+            else:
+                ctx["name"], ctx["title_source"] = fallback_name(ctx), "Rule"
+                info["rule_titles"] += 1
+            ctx["title"] = compose_title(ctx["name"], ctx["size"], ctx["color"], ctx["product_type"])
+
+    if info["ai_enabled"] and info["rule_titles"]:
+        info["warnings"].append(
+            f"AI could not title {info['rule_titles']} SKU(s); rule-based Name + Size + Colour + Type titles were used for them."
+        )
+    if not info["ai_enabled"] and store.title_strategy == "ai":
+        info["warnings"].append(
+            "AI titles are off (no GEMINI_API_KEY or switched off), so rule-based Name + Size + Colour + Type titles were used."
+        )
+    info["errors"] = list(dict.fromkeys(info["errors"]))
+    return info
 
 
 def fill_product_data(
     content_master_df: pd.DataFrame,
     gs1_df: pd.DataFrame,
     product_list_df: pd.DataFrame,
+    store: str | StoreConfig = "lavie",
+    title_generator: Callable[[list[dict[str, Any]]], dict[str, str]] | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
+    store_cfg = store if isinstance(store, StoreConfig) else get_store(store)
     cm_lookup = build_lookup(content_master_df, "BZ CODE")
     gs1_lookup = build_lookup(gs1_df, "Article")
     result_df = strip_columns(product_list_df).astype(object)
@@ -609,6 +846,7 @@ def fill_product_data(
     handle_counts: dict[str, int] = {}
 
     stats: dict[str, Any] = {
+        "store": store_cfg.key,
         "total_rows": len(result_df),
         "rows_with_sku": 0,
         "cm_matches": 0,
@@ -616,6 +854,7 @@ def fill_product_data(
         "no_matches": 0,
         "missing_cm_skus": [],
         "missing_gs1_skus": [],
+        "missing_barcode_skus": [],
         "warnings": [],
     }
 
@@ -624,16 +863,17 @@ def fill_product_data(
     if not cm_lookup:
         warnings.add("Content Master lookup is empty or missing BZ CODE.")
     if not gs1_lookup:
-        warnings.add("GS1 lookup is empty or missing Article.")
+        warnings.add("GS lookup is empty or missing Article.")
 
+    contexts: list[tuple[Any, dict[str, Any]]] = []
     for idx, row in result_df.iterrows():
         sku = normalize_sku(row.get(sku_col))
         if not sku:
             continue
 
         stats["rows_with_sku"] += 1
-        cm_data = cm_lookup.get(sku)
-        gs1_data = gs1_lookup.get(sku)
+        cm_data = cm_lookup.get(sku.upper())
+        gs1_data = gs1_lookup.get(sku.upper())
 
         if cm_data is not None:
             stats["cm_matches"] += 1
@@ -646,108 +886,86 @@ def fill_product_data(
         if cm_data is None and gs1_data is None:
             stats["no_matches"] += 1
 
-        def cm(aliases: str | Iterable[str]) -> Any:
-            return get_value(cm_data, aliases) if cm_data is not None else None
+        contexts.append((idx, build_row_context(sku, cm_data, gs1_data, store_cfg)))
 
-        def gs1(aliases: str | Iterable[str]) -> Any:
-            return get_value(gs1_data, aliases) if gs1_data is not None else None
+    title_info = generate_titles([ctx for _, ctx in contexts], store_cfg, title_generator)
 
-        gs1_size = format_size(gs1("Size"))
-        cm_size = format_size(cm("Size"))
-        final_size = gs1_size or cm_size
+    type_rows: dict[tuple[str, str, str], int] = {}
+    title_rows: list[dict[str, Any]] = []
+    for idx, ctx in contexts:
+        cm = ctx["cm"]
+        title = ctx["title"]
+        size = ctx["size"] or None
+        color = ctx["color"] or None
+        product_type = ctx["product_type"] or None
+        barcode = ctx["barcode"]
+        if not barcode:
+            stats["missing_barcode_skus"].append(ctx["sku"])
 
-        cm_color = cm(["Colour", "Color"])
-        if not is_blank(cm_color):
-            cm_color = str(cm_color).strip()
+        handle_prefix = store_cfg.handle_prefix or ctx["vendor"]
+        handle_value = unique_handle(make_handle(handle_prefix, title, size, color), handle_counts)
 
-        gs1_country = gs1("Country")
-        if not is_blank(gs1_country):
-            gs1_country = str(gs1_country).strip().title()
-
-        vendor_val = cm("Brand Name")
-        if not is_blank(vendor_val):
-            vendor_val = str(vendor_val).strip().title()
-
-        clean_final_title = remove_vendor_from_title(
-            cm(["Final Product Title", "Title"]),
-            vendor_val,
-        )
-        barcode_value = format_identifier(gs1(["EAN/UPC", "EAN Code"]))
-        handle_value = unique_handle(
-            make_handle(vendor_val, clean_final_title, final_size, cm_color),
-            handle_counts,
-        )
-
-        set_if_present(result_df, idx, "Title", clean_final_title, warnings)
+        set_if_present(result_df, idx, "Title", title, warnings)
         set_if_present(result_df, idx, "Handle", handle_value, warnings)
         set_if_present(result_df, idx, "Body (HTML)", cm(["HTML Content", "HTML content"]), warnings)
-        set_if_present(result_df, idx, "Vendor", vendor_val, warnings)
+        set_if_present(result_df, idx, "Vendor", ctx["vendor"] or None, warnings)
         set_if_present(result_df, idx, "Product Category", cm("Product Category"), warnings)
-        set_if_present(result_df, idx, "Type", cm("Subcategory"), warnings)
-        set_if_present(result_df, idx, "Tags", create_tags(cm_color, final_size), warnings, allow_blank=True)
+        set_if_present(result_df, idx, "Type", product_type, warnings)
+        set_if_present(result_df, idx, "Tags", create_tags(color, size), warnings, allow_blank=True)
         set_if_present(result_df, idx, "Published", "TRUE", warnings, allow_blank=True)
         set_if_present(result_df, idx, "Option1 Name", "Color", warnings, allow_blank=True)
-        set_if_present(
-            result_df,
-            idx,
-            "Option1 Value",
-            str(cm_color).title() if not is_blank(cm_color) else None,
-            warnings,
-        )
+        set_if_present(result_df, idx, "Option1 Value", color, warnings)
         set_if_present(result_df, idx, "Option2 Name", "Size", warnings, allow_blank=True)
-        set_if_present(result_df, idx, "Option2 Value", final_size, warnings)
-        set_if_present(result_df, idx, "Variant SKU", cm("BZ CODE") or sku, warnings)
+        set_if_present(result_df, idx, "Option2 Value", size, warnings)
+        set_if_present(result_df, idx, "Variant SKU", ctx["variant_sku"], warnings)
         set_if_present(result_df, idx, "Variant Grams", 400, warnings, allow_blank=True)
         set_if_present(result_df, idx, "Variant Inventory Tracker", "shopify", warnings, allow_blank=True)
         set_if_present(result_df, idx, "Variant Inventory Policy", "deny", warnings, allow_blank=True)
         set_if_present(result_df, idx, "Variant Fulfillment Service", "manual", warnings, allow_blank=True)
-        new_mrp = gs1("NEW MRP")
-        set_if_present(result_df, idx, "Variant Price", new_mrp, warnings)
-        set_if_present(result_df, idx, "Variant Compare At Price", new_mrp, warnings)
+        set_if_present(result_df, idx, "Variant Price", ctx["price"], warnings)
+        set_if_present(result_df, idx, "Variant Compare At Price", ctx["price"], warnings)
         set_if_present(result_df, idx, "Variant Requires Shipping", "TRUE", warnings, allow_blank=True)
         set_if_present(result_df, idx, "Variant Taxable", "FALSE", warnings, allow_blank=True)
-        set_if_present(result_df, idx, "Variant Barcode", barcode_value, warnings)
+        set_first_present(result_df, idx, BARCODE_COLUMNS, barcode, warnings)
         set_if_present(result_df, idx, "Gift Card", "FALSE", warnings, allow_blank=True)
-        set_if_present(result_df, idx, "SEO Title", seo_title(clean_final_title), warnings)
+        set_if_present(result_df, idx, "SEO Title", seo_title(title, store_cfg.seo_suffix), warnings)
         set_if_present(result_df, idx, "SEO Description", cm("Product Description"), warnings)
         set_if_present(result_df, idx, "Google Shopping / Gender", cm("Target Gender"), warnings)
-        set_if_present(result_df, idx, "Google Shopping / MPN", barcode_value, warnings)
-        set_if_present(result_df, idx, "Image Alt Text", image_alt_text(clean_final_title, cm_color), warnings)
+        set_if_present(result_df, idx, MPN_COLUMN, barcode, warnings)
+        set_if_present(result_df, idx, "Image Alt Text", image_alt_text(title), warnings)
+        set_if_present(result_df, idx, BADGE_COLUMN, BADGE_VALUE, warnings, allow_blank=True)
 
-        metafield_mappings = {
-            "Closure Type (product.metafields.custom.closure_type)": "Closure type",
-            "Compartments (product.metafields.custom.compartments)": "No. of Compartments",
-            "External Pockets (product.metafields.custom.external_pockets)": "External Pockets",
-            "Internal Pockets (product.metafields.custom.internal_pockets)": "Internal Pockets",
-            "Laptop Compartment (product.metafields.custom.laptop_compartment)": "Laptop Compartment",
-            "Lining Type (product.metafields.custom.lining_type)": "Lining Type",
-            "Material (product.metafields.custom.material)": "Material",
-            "Occasion (product.metafields.custom.occasion)": "Occasion",
-            "Pattern (product.metafields.custom.pattern)": "Pattern",
-            "product category (product.metafields.custom.product_category)": "Subcategory",
-            "Strap Type (product.metafields.custom.strap_type)": "Strap Type",
-            "Water Resistant (product.metafields.custom.water_resistant)": "Water Resistant",
-            "Care Instruction (product.metafields.my_fields.care_instruction)": "Care Instruction",
-            "product deacription (product.metafields.my_fields.product_description)": "Product Description",
-        }
-        for target_col, source_col in metafield_mappings.items():
+        for target_col, source_col in METAFIELD_MAPPINGS.items():
             set_if_present(result_df, idx, target_col, cm(source_col), warnings)
+        set_if_present(
+            result_df,
+            idx,
+            "product category (product.metafields.custom.product_category)",
+            product_type,
+            warnings,
+        )
 
         set_if_present(result_df, idx, "Quantity (product.metafields.custom.product_qty)", "1N", warnings, allow_blank=True)
-        set_if_present(result_df, idx, "Size (product.metafields.custom.size)", final_size, warnings)
-        set_if_present(result_df, idx, "Country of origin (product.metafields.my_fields.country_of_origin)", gs1_country, warnings)
+        set_if_present(result_df, idx, "Size (product.metafields.custom.size)", size, warnings)
+        set_if_present(
+            result_df,
+            idx,
+            "Country of origin (product.metafields.my_fields.country_of_origin)",
+            ctx["country"] or None,
+            warnings,
+        )
         set_if_present(
             result_df,
             idx,
             "Manufacturer Details (product.metafields.my_fields.manufacturer_details)",
-            get_manufacturer_details(gs1_country),
+            get_manufacturer_details(ctx["country"]),
             warnings,
         )
         set_if_present(
             result_df,
             idx,
             "Dimensions (product.metafields.my_fields.specifications)",
-            format_dimension(gs1(["Dimension", "System Dimension"])),
+            ctx["dimension"],
             warnings,
         )
         for column_name in UNMAPPED_FINAL_COLUMNS:
@@ -755,8 +973,45 @@ def fill_product_data(
         set_if_present(result_df, idx, "Variant Weight Unit", "kg", warnings, allow_blank=True)
         set_if_present(result_df, idx, "Status", "draft", warnings, allow_blank=True)
 
+        type_key = (ctx["raw_subcategory"] or "(blank)", ctx["product_type"] or "(blank)", ctx["type_method"])
+        type_rows[type_key] = type_rows.get(type_key, 0) + 1
+        title_rows.append(
+            {
+                "SKU": ctx["sku"],
+                "Title": title,
+                "Title Source": ctx["title_source"],
+                "Name Part": ctx["name"],
+                "Size (GS)": ctx["size"],
+                "Colour": ctx["color"],
+                "Colour Source": ctx["color_source"],
+                "Type": ctx["product_type"],
+                "Content Subcategory": ctx["raw_subcategory"],
+                "Barcode (EAN/UPC)": barcode or "",
+                "Content Product Title": ctx["product_title"],
+            }
+        )
+
+    unmapped = sorted({raw for (raw, _, method) in type_rows if method == "unmapped"})
+    if unmapped:
+        warnings.add(
+            "Subcategory value(s) not in the Type map, used as written: " + ", ".join(unmapped[:8])
+        )
+    missing_type = [ctx["sku"] for _, ctx in contexts if not ctx["product_type"]]
+    if missing_type:
+        warnings.add(f"{len(missing_type)} SKU(s) have no Subcategory in the Content Master, so Type is blank.")
+    if stats["missing_barcode_skus"]:
+        warnings.add(f"{len(stats['missing_barcode_skus'])} SKU(s) have no EAN/UPC in the GS sheet.")
+
     stats["missing_cm_skus"] = unique_preserve(stats["missing_cm_skus"])
     stats["missing_gs1_skus"] = unique_preserve(stats["missing_gs1_skus"])
+    stats["missing_barcode_skus"] = unique_preserve(stats["missing_barcode_skus"])
+    stats["title_info"] = title_info
+    stats["title_rows"] = title_rows
+    stats["type_rows"] = [
+        {"Content Subcategory": raw, "Shopify Type": mapped, "Match": method, "SKUs": count}
+        for (raw, mapped, method), count in sorted(type_rows.items())
+    ]
+    warnings.update(title_info.get("warnings", []))
     stats["warnings"] = sorted(warnings)
     return result_df, stats
 
@@ -779,6 +1034,8 @@ def normalize_dropbox_url(url: Any) -> str:
 
 
 def read_dropbox_sheet(path: str | Path, sheet_name: str) -> pd.DataFrame:
+    if Path(path).suffix.lower() == ".csv":
+        return pd.read_csv(path, header=None, dtype=str, encoding="utf-8-sig")
     return read_excel_file(path, sheet_name=sheet_name, header=None)
 
 
@@ -794,7 +1051,7 @@ def build_dropbox_map(dropbox_df: pd.DataFrame) -> dict[str, list[str]]:
             if not is_blank(value)
         ]
         if images:
-            sku_map[sku] = images
+            sku_map[sku.upper()] = images
     return sku_map
 
 
@@ -810,9 +1067,12 @@ def select_dropbox_sheet(
     product_df: pd.DataFrame,
     requested_sheet: str | None = None,
 ) -> tuple[str, pd.DataFrame, dict[str, list[str]], dict[str, int]]:
-    xls = get_excel_file(path)
-    candidate_sheets = [requested_sheet] if requested_sheet else xls.sheet_names
-    product_sku_set = set(product_skus(product_df))
+    if Path(path).suffix.lower() == ".csv":
+        candidate_sheets = ["CSV"]
+    else:
+        xls = get_excel_file(path)
+        candidate_sheets = [requested_sheet] if requested_sheet else xls.sheet_names
+    product_sku_set = {sku.upper() for sku in product_skus(product_df)}
 
     best_sheet = candidate_sheets[0]
     best_df = read_dropbox_sheet(path, best_sheet)
@@ -835,7 +1095,7 @@ def select_dropbox_sheet(
 
 def map_product_images(
     product_df: pd.DataFrame,
-    dropbox_path: str | Path,
+    dropbox_path: str | Path | None,
     requested_sheet: str | None = None,
     minimum_image_slots: int = 0,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
@@ -843,6 +1103,23 @@ def map_product_images(
     sku_col = resolve_column(product_df.columns, "SKU")
     if sku_col is None:
         raise ValueError("Product Listing must contain a SKU column before image mapping.")
+
+    if dropbox_path is None:
+        # Dropbox sheet is optional: keep rows as they are, no image links are added.
+        return product_df, {
+            "skipped": True,
+            "selected_sheet": None,
+            "sheet_scores": {},
+            "dropbox_rows": 0,
+            "dropbox_skus": 0,
+            "original_rows": len(product_df),
+            "result_rows": len(product_df),
+            "blank_sku_rows_preserved": int(product_df[sku_col].map(lambda v: not normalize_sku(v)).sum()),
+            "skus_with_images": 0,
+            "image_urls_written": 0,
+            "missing_image_skus": [],
+            "warnings": [],
+        }
 
     selected_sheet, dropbox_df, sku_map, sheet_scores = select_dropbox_sheet(
         dropbox_path,
@@ -878,7 +1155,7 @@ def map_product_images(
 
         handle_value = original_row.get(handle_col, "") if handle_col else ""
         image_alt_value = original_row.get(image_alt_col, "") if image_alt_col else ""
-        images = sku_map.get(sku_value, [])
+        images = sku_map.get(sku_value.upper(), [])
 
         if images:
             skus_with_images += 1
@@ -930,8 +1207,9 @@ def map_product_images(
                 blank_row[variant_image_col] = ""
             result_rows.append(blank_row)
 
-    result_df = pd.DataFrame(result_rows, columns=all_columns)
+    result_df = pd.DataFrame(result_rows, columns=all_columns, dtype=object)
     stats = {
+        "skipped": False,
         "selected_sheet": selected_sheet,
         "sheet_scores": sheet_scores,
         "dropbox_rows": len(dropbox_df),
@@ -956,6 +1234,49 @@ def safe_excel_df(df: pd.DataFrame) -> pd.DataFrame:
     return df.map(trim)
 
 
+def numeric_identifier_columns(df: pd.DataFrame) -> list[str]:
+    columns = []
+    for target in [*BARCODE_COLUMNS, MPN_COLUMN]:
+        col = resolve_column(df.columns, target)
+        if col is not None and col not in columns:
+            columns.append(col)
+    return columns
+
+
+def write_shopify_excel(df: pd.DataFrame, path: str | Path) -> None:
+    """Excel backup with EAN/UPC and MPN stored as real numbers shown in full (no 8.9E+12)."""
+    excel_df = safe_excel_df(df)
+    id_columns = numeric_identifier_columns(excel_df)
+
+    def to_number(value: Any) -> Any:
+        text = format_identifier(value)
+        if text and re.fullmatch(r"\d{1,15}", text):
+            return int(text)
+        return value
+
+    for col in id_columns:
+        excel_df[col] = excel_df[col].map(to_number).astype(object)
+
+    with pd.ExcelWriter(path, engine="openpyxl") as writer:
+        excel_df.to_excel(writer, index=False, sheet_name="Shopify Import")
+        if excel_df.empty:
+            return
+        sheet = writer.sheets["Shopify Import"]
+        for col in id_columns:
+            col_idx = excel_df.columns.get_loc(col) + 1
+            for (cell,) in sheet.iter_rows(min_row=2, min_col=col_idx, max_col=col_idx):
+                if isinstance(cell.value, int):
+                    cell.number_format = "0"
+
+
+def finalize_identifiers(df: pd.DataFrame) -> pd.DataFrame:
+    """Make sure barcode / MPN cells are plain digit strings in the CSV."""
+    df = df.copy()
+    for col in numeric_identifier_columns(df):
+        df[col] = df[col].map(lambda value: format_identifier(value) if not is_blank(value) else value)
+    return df
+
+
 def build_report_frames(
     content_info: dict[str, Any],
     gs1_info: dict[str, Any],
@@ -972,30 +1293,47 @@ def build_report_frames(
     warnings.extend(fill_stats.get("warnings", []))
     warnings.extend(image_stats.get("warnings", []))
 
+    title_info = fill_stats.get("title_info", {})
     summary_rows = [
+        ("Store", fill_stats.get("store")),
         ("Content sheet", content_info.get("sheet_name")),
-        ("GS1 sheet", gs1_info.get("sheet_name")),
-        ("GS1 header row", gs1_info.get("header_row")),
-        ("Dropbox sheet", image_stats.get("selected_sheet")),
+        ("GS sheet", gs1_info.get("sheet_name")),
+        ("GS header row", gs1_info.get("header_row")),
+        ("Dropbox sheet", image_stats.get("selected_sheet") or "Not uploaded"),
         ("Content rows", content_info.get("rows")),
         ("Product rows uploaded", fill_stats.get("total_rows")),
         ("Rows with SKU", fill_stats.get("rows_with_sku")),
         ("Content Master matches", fill_stats.get("cm_matches")),
-        ("GS1 matches", fill_stats.get("gs1_matches")),
-        ("No CM/GS1 match", fill_stats.get("no_matches")),
+        ("GS matches", fill_stats.get("gs1_matches")),
+        ("No CM/GS match", fill_stats.get("no_matches")),
+        ("SKUs without EAN/UPC", len(fill_stats.get("missing_barcode_skus", []))),
+        ("AI titles", title_info.get("ai_titles", 0)),
+        ("Family titles", title_info.get("family_titles", 0)),
+        ("Rule-based titles", title_info.get("rule_titles", 0)),
+        ("AI model", title_info.get("model") or "-"),
         ("SKUs with images", image_stats.get("skus_with_images")),
         ("Missing image SKUs", len(image_stats.get("missing_image_skus", []))),
         ("Final rows", image_stats.get("result_rows")),
         ("Image URLs written", image_stats.get("image_urls_written")),
     ]
+    checklist = [
+        ("EAN / UPC barcodes", "Variant Barcode and Google Shopping / MPN are the GS EAN/UPC as plain numbers."),
+        ("Titles", "Lavie: AI Name + Size + Colour + Type. Akiki: Family + Size + Colour + Type."),
+        ("Types", "Type comes from the Content Master Subcategory, cleaned to the store's Type list."),
+        ("Tags", "colour, nano, new-launch, size. Add store-specific tags if needed."),
+        ("Image alt text", "Same as the title on every image row."),
+        ("Badges", "Set to New for every new listing."),
+    ]
     frames = {
         "Summary": pd.DataFrame(summary_rows, columns=["Metric", "Value"]),
-        "Missing Content Master": pd.DataFrame(
-            {"SKU": fill_stats.get("missing_cm_skus", [])}
-        ),
-        "Missing GS1": pd.DataFrame({"SKU": fill_stats.get("missing_gs1_skus", [])}),
+        "Cross Check": pd.DataFrame(checklist, columns=["Please cross-check", "What the tool did"]),
+        "Titles": pd.DataFrame(fill_stats.get("title_rows", [])),
+        "Type Mapping": pd.DataFrame(fill_stats.get("type_rows", [])),
+        "Missing Content Master": pd.DataFrame({"SKU": fill_stats.get("missing_cm_skus", [])}),
+        "Missing GS": pd.DataFrame({"SKU": fill_stats.get("missing_gs1_skus", [])}),
+        "Missing EAN": pd.DataFrame({"SKU": fill_stats.get("missing_barcode_skus", [])}),
         "Missing Images": pd.DataFrame({"SKU": image_stats.get("missing_image_skus", [])}),
-        "Warnings": pd.DataFrame({"Warning": unique_preserve(warnings)}),
+        "Warnings": pd.DataFrame({"Warning": unique_preserve(warnings + title_info.get("errors", []))}),
         "Dropbox Sheet Scores": pd.DataFrame(
             [
                 {"Sheet": sheet, "SKU Overlap": score}
@@ -1015,13 +1353,16 @@ def write_report(path: str | Path, frames: dict[str, pd.DataFrame]) -> None:
 def run_pipeline(
     content_master_path: str | Path,
     gs1_path: str | Path,
-    dropbox_path: str | Path,
+    dropbox_path: str | Path | None,
     product_list_path: str | Path,
     output_dir: str | Path,
     content_sheet: str | None = None,
     gs1_sheet: str | None = None,
     dropbox_sheet: str | None = None,
+    store: str = "lavie",
+    title_generator: Callable[[list[dict[str, Any]]], dict[str, str]] | None = None,
 ) -> dict[str, Any]:
+    store_cfg = get_store(store)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1033,15 +1374,19 @@ def run_pipeline(
         transformed_content_df,
         gs1_df,
         product_df,
+        store=store_cfg,
+        title_generator=title_generator,
     )
     final_df, image_stats = map_product_images(filled_df, dropbox_path, dropbox_sheet)
+    final_df = finalize_identifiers(final_df)
 
-    csv_path = output_dir / "shopify_import_ready.csv"
-    excel_path = output_dir / "shopify_import_ready.xlsx"
-    report_path = output_dir / "processing_report.xlsx"
+    prefix = f"{store_cfg.key}_"
+    csv_path = output_dir / f"{prefix}shopify_import_ready.csv"
+    excel_path = output_dir / f"{prefix}shopify_import_ready.xlsx"
+    report_path = output_dir / f"{prefix}processing_report.xlsx"
 
     final_df.to_csv(csv_path, index=False, encoding="utf-8-sig")
-    safe_excel_df(final_df).to_excel(excel_path, index=False, engine="openpyxl")
+    write_shopify_excel(final_df, excel_path)
 
     report_frames = build_report_frames(
         content_load_info.as_dict(),
@@ -1054,6 +1399,7 @@ def run_pipeline(
     write_report(report_path, report_frames)
 
     return {
+        "store": store_cfg,
         "final_df": final_df,
         "content_info": content_load_info.as_dict(),
         "gs1_info": gs1_load_info.as_dict(),

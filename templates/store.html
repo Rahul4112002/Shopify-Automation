@@ -1,0 +1,322 @@
+{% extends "base.html" %}
+{% block title %}{{ store.name }} listing · Listing Studio{% endblock %}
+{% block body_class %}store-page store-page--{{ store.key }}{% endblock %}
+
+{% block content %}
+<nav class="breadcrumb" aria-label="Breadcrumb">
+  <a href="{{ url_for('index') }}">Stores</a>
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+  <span>{{ store.name }}</span>
+</nav>
+
+<header class="page-head">
+  <div class="page-head__title">
+    <span class="store-mark store-mark--{{ store.key }}" aria-hidden="true">{{ 'LV' if store.key == 'lavie' else 'AK' }}</span>
+    <div>
+      <h1>{{ store.name }} product listing</h1>
+      <p>{{ store.tagline }} Upload the files below to build a Shopify import file.</p>
+    </div>
+  </div>
+  <div class="page-head__meta">
+    <span class="chip"><strong>Title:</strong> {{ store.title_pattern }}</span>
+    {% if ai.applies %}
+      {% if ai.configured %}
+        <span class="chip chip--success"><span class="dot"></span>AI titles on · {{ ai.model }}</span>
+      {% else %}
+        <span class="chip chip--warning"><span class="dot"></span>AI key not set · rule-based titles</span>
+      {% endif %}
+    {% endif %}
+  </div>
+</header>
+
+{% if error %}
+<div class="alert alert--error" role="alert">
+  <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>
+  <div>
+    <strong>The listing file could not be generated</strong>
+    <p>{{ error }}</p>
+  </div>
+</div>
+{% endif %}
+
+{% if is_vercel and not blob_uploads_enabled %}
+<div class="alert alert--warning">
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2 20h20L12 3Z"/><path d="M12 10v4M12 17h.01"/></svg>
+  <div>
+    <strong>Upload limit {{ upload_limit_mb }} MB</strong>
+    <p>This deployment accepts up to {{ upload_limit_mb }} MB in total. Enable Vercel Blob for full-size Content Master and GS files.</p>
+  </div>
+</div>
+{% endif %}
+
+{% if result %}
+{% set stats = result.report_stats %}
+<section class="results" id="results" aria-live="polite">
+  <div class="result-hero {{ 'result-hero--ready' if stats.status == 'Ready' else 'result-hero--review' }}">
+    <div class="result-hero__icon" aria-hidden="true">
+      {% if stats.status == 'Ready' %}
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/></svg>
+      {% else %}
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>
+      {% endif %}
+    </div>
+    <div class="result-hero__text">
+      <h2>Your {{ store.name }} listing file is ready</h2>
+      <p>
+        {{ stats.total_skus }} SKU{{ '' if stats.total_skus == 1 else 's' }} processed · {{ stats.output_rows }} rows in the import file
+        {% if stats.review_skus %} · <strong>{{ stats.review_skus }} need a look</strong>{% endif %}
+      </p>
+    </div>
+    <div class="result-hero__actions">
+      <a class="btn btn-primary" href="{{ result.blob_downloads.csv if result.blob_downloads and result.blob_downloads.csv else url_for('download', job_id=result.job_id, filename=result.downloads.csv) }}">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0 4-4m-4 4-4-4"/><path d="M5 19h14"/></svg>
+        Shopify CSV
+      </a>
+      <a class="btn btn-secondary" href="{{ result.blob_downloads.excel if result.blob_downloads and result.blob_downloads.excel else url_for('download', job_id=result.job_id, filename=result.downloads.excel) }}">Excel backup</a>
+      <a class="btn btn-secondary" href="{{ result.blob_downloads.report if result.blob_downloads and result.blob_downloads.report else url_for('download', job_id=result.job_id, filename=result.downloads.report) }}">QA report</a>
+    </div>
+  </div>
+
+  <div class="crosscheck" data-checklist>
+    <div class="crosscheck__head">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+      <div>
+        <h3>Please cross-check before you import to Shopify</h3>
+        <p>These fields are filled automatically. Review them in the CSV, or in the “Titles” and “Type Mapping” sheets of the QA report.</p>
+      </div>
+      <span class="crosscheck__progress" data-checklist-progress>0 of 5 checked</span>
+    </div>
+    <ul class="checklist">
+      <li><label><input type="checkbox"><span><strong>EAN codes</strong> Variant Barcode and Google Shopping MPN come from GS EAN/UPC as plain numbers.{% if stats.missing_barcode %} <em>{{ stats.missing_barcode }} SKU(s) have no EAN.</em>{% endif %}</span></label></li>
+      <li><label><input type="checkbox"><span><strong>Tags</strong> colour, nano, new-launch and size. Add any store-specific tags you use.</span></label></li>
+      <li><label><input type="checkbox"><span><strong>Titles</strong>
+        {% if store.title_strategy == 'ai' %}
+          {{ stats.ai_titles }} written by AI, {{ stats.rule_titles }} rule-based (Name + Size + Colour + Type).
+        {% else %}
+          {{ stats.family_titles }} from GS Family{% if stats.rule_titles %}, {{ stats.rule_titles }} rule-based{% endif %} (Family + Size + Colour + Type).
+        {% endif %}
+      </span></label></li>
+      <li><label><input type="checkbox"><span><strong>Types</strong> Content Master Subcategory, cleaned to the store's Type list (for example Satchel → Satchel Bag).</span></label></li>
+      <li><label><input type="checkbox"><span><strong>Image alt text and badges</strong> Alt text equals the title; the Badges metafield is set to “New”.</span></label></li>
+    </ul>
+  </div>
+
+  <div class="kpi-grid">
+    <div class="kpi"><span>Total SKUs</span><strong>{{ stats.total_skus }}</strong></div>
+    <div class="kpi kpi--good"><span>Ready</span><strong>{{ stats.ready_skus }}</strong></div>
+    <div class="kpi {{ 'kpi--warn' if stats.review_skus else '' }}"><span>Need a look</span><strong>{{ stats.review_skus }}</strong></div>
+    <div class="kpi"><span>Import rows</span><strong>{{ stats.output_rows }}</strong></div>
+    <div class="kpi"><span>Image links</span><strong>{{ 'Skipped' if stats.images_skipped else stats.images_written }}</strong></div>
+    <div class="kpi"><span>{{ 'AI titles' if store.title_strategy == 'ai' else 'Family titles' }}</span><strong>{{ stats.ai_titles if store.title_strategy == 'ai' else stats.family_titles }}</strong></div>
+  </div>
+
+  {% if store.title_strategy == 'ai' and result.use_ai and stats.ai_errors %}
+  <div class="alert alert--warning">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2 20h20L12 3Z"/><path d="M12 10v4M12 17h.01"/></svg>
+    <div>
+      <strong>AI titles were only partly available</strong>
+      <p>Rule-based titles were used where the AI did not answer. Details: {{ stats.ai_errors | join(' · ') }}</p>
+    </div>
+  </div>
+  {% endif %}
+
+  {% set fs = result.fill_stats %}
+  {% set missing_images = [] if stats.images_skipped else result.image_stats.missing_image_skus %}
+  {% if fs.missing_cm_skus or fs.missing_gs1_skus or fs.missing_barcode_skus or missing_images or result.warnings %}
+  <div class="issues card">
+    <h3>Items to review</h3>
+    <div class="issues__grid">
+      {% for label, skus in [('Not in Content Master', fs.missing_cm_skus), ('Not in GS sheet', fs.missing_gs1_skus), ('No EAN/UPC in GS', fs.missing_barcode_skus), ('No Dropbox images', missing_images)] if skus %}
+      <div class="issue">
+        <div class="issue__head"><strong>{{ label }}</strong><span class="badge badge-warning">{{ skus|length }}</span></div>
+        <p class="sku-list">{{ skus[:12] | join(', ') }}{% if skus|length > 12 %} and {{ skus|length - 12 }} more (see report){% endif %}</p>
+      </div>
+      {% endfor %}
+    </div>
+    {% if result.warnings %}
+    <ul class="warning-list">
+      {% for warning in result.warnings[:8] %}<li>{{ warning }}</li>{% endfor %}
+      {% if result.warnings|length > 8 %}<li>{{ result.warnings|length - 8 }} more in the QA report.</li>{% endif %}
+    </ul>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <div class="card table-card">
+    <div class="table-card__head">
+      <div>
+        <h3>Preview</h3>
+        <p>First {{ result.preview.rows|length }} rows of the Shopify import file.</p>
+      </div>
+      <div class="detected">
+        <span>Content: <strong>{{ result.content_info.sheet_name }}</strong></span>
+        <span>GS: <strong>{{ result.gs1_info.sheet_name }}</strong></span>
+        <span>Dropbox: <strong>{{ result.image_stats.selected_sheet or 'not uploaded' }}</strong></span>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>{% for column in result.preview.columns %}<th>{{ column }}</th>{% endfor %}</tr>
+        </thead>
+        <tbody>
+          {% for row in result.preview.rows %}
+          <tr class="{{ 'is-image-row' if not row.source else '' }}">
+            {% for cell in row.cells %}
+              {% if cell.key == 'Title' %}
+              <td class="cell-title">{{ cell.value }}{% if row.source %} <span class="source source--{{ row.source.split(' ')[0]|lower }}">{{ row.source.split(' ')[0] }}</span>{% endif %}</td>
+              {% elif cell.key == 'Image Src' and cell.value %}
+              <td class="cell-url"><a href="{{ cell.value }}" target="_blank" rel="noopener">{{ cell.value }}</a></td>
+              {% else %}
+              <td>{{ cell.value }}</td>
+              {% endif %}
+            {% endfor %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="results__again">
+    <a class="btn btn-ghost" href="{{ url_for('store_page', store_key=store.key) }}">Start a new {{ store.name }} run</a>
+    <a class="btn btn-ghost" href="{{ url_for('index') }}">Switch store</a>
+  </div>
+</section>
+{% endif %}
+
+<div class="workspace {{ 'workspace--after-result' if result else '' }}">
+  <form
+    class="upload-form"
+    action="{{ url_for('process', store_key=store.key) }}"
+    method="post"
+    enctype="multipart/form-data"
+    data-max-upload-mb="{{ upload_limit_mb }}"
+    data-blob-enabled="{{ '1' if blob_uploads_enabled else '0' }}"
+    data-blob-upload-url="/api/blob-upload"
+    data-store="{{ store.key }}"
+    novalidate
+  >
+    <div class="section-head">
+      <div>
+        <h2>{{ 'Run again' if result else 'Upload files' }}</h2>
+        <p>3 required files and 1 optional file. Sheets and header rows are detected automatically.</p>
+      </div>
+    </div>
+
+    <div class="upload-grid">
+      {% for card in cards %}
+      <section class="upload-card" data-upload-card data-required="{{ '1' if card.required else '0' }}" data-label="{{ card.label }}">
+        <header class="upload-card__head">
+          <span class="step-num">{{ card.step }}</span>
+          <div class="upload-card__title">
+            <h3>{{ card.label }}</h3>
+            <p>{{ card.summary }}</p>
+          </div>
+          <span class="badge {{ 'badge-required' if card.required else 'badge-optional' }}">{{ 'Required' if card.required else 'Optional' }}</span>
+        </header>
+
+        <label class="dropzone">
+          <input type="file" name="{{ card.name }}" accept="{{ card.accept }}" {{ 'required' if card.required }}>
+          <span class="dropzone__icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M12 15V4m0 0 4 4m-4-4-4 4"/><path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg>
+          </span>
+          <span class="dropzone__text">
+            <span class="dropzone__title" data-file-name>Drop file here or <u>browse</u></span>
+            <span class="dropzone__meta" data-file-meta>{{ card.formats }}</span>
+          </span>
+          <button type="button" class="dropzone__clear" data-clear hidden aria-label="Remove file">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+          </button>
+        </label>
+
+        <div class="uses">
+          <p class="uses__title">What the tool reads from it</p>
+          <ul>
+            {% for column, use in card.uses %}
+            <li><code>{{ column }}</code><span>{{ use }}</span></li>
+            {% endfor %}
+          </ul>
+        </div>
+      </section>
+      {% endfor %}
+    </div>
+
+    {% if ai.applies %}
+    <div class="ai-toggle {{ '' if ai.configured else 'is-disabled' }}">
+      <label class="switch">
+        <input type="checkbox" name="use_ai" value="1" {{ 'checked' if ai.configured and (not result or result.use_ai) }} {{ 'disabled' if not ai.configured }}>
+        <span class="switch__track"><span class="switch__thumb"></span></span>
+      </label>
+      <div>
+        <strong>Write titles with AI (Gemini)</strong>
+        {% if ai.configured %}
+        <p>The AI reads Product Title, BZ Description and Style Name and writes the name part. The tool adds Size, Colour and Type. Any style the AI misses gets a rule-based title.</p>
+        {% else %}
+        <p>Set <code>GEMINI_API_KEY</code> to switch this on. Until then titles are rule-based: Name + Size + Colour + Type.</p>
+        {% endif %}
+      </div>
+      <input type="hidden" name="use_ai" value="0" data-ai-fallback>
+    </div>
+    {% endif %}
+
+    <details class="advanced">
+      <summary>Advanced: choose sheets manually</summary>
+      <div class="override-grid">
+        <label>Content Master sheet <input type="text" name="content_sheet" placeholder="Auto detect"></label>
+        <label>GS sheet <input type="text" name="gs1_sheet" placeholder="Auto detect"></label>
+        <label>Dropbox sheet <input type="text" name="dropbox_sheet" placeholder="Auto detect"></label>
+      </div>
+    </details>
+
+    <div class="form-actions">
+      <p class="form-error" data-form-error role="alert" hidden></p>
+      <button class="btn btn-primary btn-lg run-button" type="submit">
+        <span data-run-label>Generate listing file</span>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+      </button>
+      <span class="hint">Usually 10 to 40 seconds, longer with AI titles for many styles.</span>
+    </div>
+  </form>
+
+  <aside class="side">
+    <div class="card side-card">
+      <h3>Field mapping</h3>
+      <dl class="mapping">
+        <div><dt>Title</dt><dd>{{ store.title_pattern }}</dd></div>
+        <div><dt>Type</dt><dd>Content Master Subcategory, spelling and case cleaned</dd></div>
+        <div><dt>Option1 Value</dt><dd>GS Colour</dd></div>
+        <div><dt>Option2 Value</dt><dd>GS Size</dd></div>
+        <div><dt>Variant Barcode</dt><dd>GS EAN/UPC as a number</dd></div>
+        <div><dt>Google MPN</dt><dd>GS EAN/UPC as a number</dd></div>
+        <div><dt>Badges</dt><dd>New</dd></div>
+        <div><dt>Image alt text</dt><dd>Same as title</dd></div>
+        <div><dt>SEO title</dt><dd>Buy &lt;title&gt; Online - {{ store.seo_suffix }}</dd></div>
+        {% if store.vendor_override %}<div><dt>Vendor</dt><dd>{{ store.vendor_override }}</dd></div>{% endif %}
+      </dl>
+    </div>
+    <div class="card side-card side-card--muted">
+      <h3>Title example</h3>
+      {% if store.key == 'lavie' %}
+      <p class="example">Whitney 2 Compartment Medium Off White Satchel Bag</p>
+      <p class="side-note">Name from the AI, then Size, Colour and Type with no repeated words.</p>
+      {% else %}
+      <p class="example">Maldon Small Red Trunk Bag</p>
+      <p class="side-note">GS Family, then Size, Colour and Type.</p>
+      {% endif %}
+    </div>
+  </aside>
+</div>
+
+<div class="busy" data-busy hidden>
+  <div class="busy__card" role="status" aria-live="polite">
+    <span class="spinner" aria-hidden="true"></span>
+    <strong>Generating your {{ store.name }} listing file</strong>
+    <p data-busy-text>Uploading files…</p>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script type="module" src="{{ url_for('static_asset', filename='app.js') }}"></script>
+{% endblock %}

@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Choose a store · Listing Studio{% endblock %}
+
+{% block content %}
+<section class="intro">
+  <p class="eyebrow">Start here</p>
+  <h1>Which store are you listing for?</h1>
+  <p class="lead">Pick a store to open its upload page. Both stores use the same four uploads and the same Shopify mapping; only the title rules differ.</p>
+</section>
+
+<div class="store-grid">
+  {% for store in stores %}
+  <a class="store-card store-card--{{ store.key }}" href="{{ url_for('store_page', store_key=store.key) }}">
+    <div class="store-card__top">
+      <span class="store-mark store-mark--{{ store.key }}" aria-hidden="true">{{ 'LV' if store.key == 'lavie' else 'AK' }}</span>
+      <div>
+        <h2>{{ store.name }}</h2>
+        <p>{{ store.tagline }}</p>
+      </div>
+    </div>
+
+    <dl class="facts">
+      <div>
+        <dt>Title pattern</dt>
+        <dd>{{ store.title_pattern }}</dd>
+      </div>
+      <div>
+        <dt>Titles written by</dt>
+        <dd>
+          {% if store.title_strategy == 'ai' %}
+            Gemini AI{% if not ai_configured %} <span class="badge badge-muted">key not set, rule-based backup</span>{% else %} <span class="badge badge-success">connected</span>{% endif %}
+          {% else %}
+            GS Family name (no AI needed)
+          {% endif %}
+        </dd>
+      </div>
+      <div>
+        <dt>SEO title</dt>
+        <dd>Buy &lt;title&gt; Online - {{ store.seo_suffix }}</dd>
+      </div>
+    </dl>
+
+    <span class="btn btn-primary btn-block">
+      Open {{ store.name }} uploads
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+    </span>
+  </a>
+  {% endfor %}
+</div>
+
+<section class="how card">
+  <h2>How it works</h2>
+  <ol class="how__steps">
+    <li><span>1</span><div><strong>Choose a store</strong><p>LAVIE or AKIKI LONDON.</p></div></li>
+    <li><span>2</span><div><strong>Upload the files</strong><p>Content Master, GS sheet and Product list are required. Dropbox links are optional.</p></div></li>
+    <li><span>3</span><div><strong>Download</strong><p>Get the Shopify CSV, an Excel backup and a QA report.</p></div></li>
+    <li><span>4</span><div><strong>Cross-check and import</strong><p>Review EAN codes, tags, titles and types, then import to Shopify.</p></div></li>
+  </ol>
+</section>
+{% endblock %}
