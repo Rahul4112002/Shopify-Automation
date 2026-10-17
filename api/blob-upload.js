@@ -52,7 +52,11 @@ export async function POST(request) {
             "application/octet-stream",
             "application/vnd.ms-excel",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            // Browsers report .xlsb in lower case; Vercel compares content types case-sensitively.
             "application/vnd.ms-excel.sheet.binary.macroEnabled.12",
+            "application/vnd.ms-excel.sheet.binary.macroenabled.12",
+            "application/x-msexcel",
+            "text/plain",
           ],
           addRandomSuffix: true,
           tokenPayload: JSON.stringify({

@@ -152,9 +152,19 @@ function collectFields(formEl) {
   return data;
 }
 
-async function uploadFilesToBlob(formEl, inputs) {
+function cleanupUploads(uploads) {
+  const urls = Object.values(uploads).map((item) => item.url).filter(Boolean);
+  if (!urls.length) return;
+  fetch("/blob-cleanup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ urls }),
+    keepalive: true,
+  }).catch(() => {});
+}
+
+async function uploadFilesToBlob(formEl, inputs, uploads) {
   const { upload } = await import("https://esm.sh/@vercel/blob/client");
-  const uploads = {};
   const jobId = crypto.randomUUID();
   const selected = inputs.filter((input) => input.files?.[0]);
 
@@ -206,7 +216,13 @@ async function uploadFilesToBlob(formEl, inputs) {
 }
 
 async function submitWithBlob(formEl, inputs) {
-  const uploads = await uploadFilesToBlob(formEl, inputs);
+  const uploads = {};
+  try {
+    await uploadFilesToBlob(formEl, inputs, uploads);
+  } catch (error) {
+    cleanupUploads(uploads); // don't leave half a run's sheets in the Blob store
+    throw error;
+  }
   setBusy(true, "Matching SKUs, writing titles and building the CSV…");
 
   const data = collectFields(formEl);

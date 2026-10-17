@@ -613,6 +613,25 @@ def process(store_key: str):
         return render_store(store, error=str(exc), status=400)
 
 
+@app.post("/blob-cleanup")
+def blob_cleanup():
+    """Delete input files left behind when a browser upload fails part-way."""
+    data = request.get_json(silent=True) or {}
+    urls = []
+    for url in data.get("urls", [])[:10]:
+        if not isinstance(url, str):
+            continue
+        try:
+            validate_blob_url(url)
+        except ValueError:
+            continue
+        if urlparse(url).path.startswith("/shopify-listing/input/"):
+            urls.append(url)
+    if urls and blob_uploads_enabled():
+        delete_blob_uploads({str(index): {"url": url} for index, url in enumerate(urls)})
+    return {"deleted": len(urls)}
+
+
 @app.get("/download/<job_id>/<filename>")
 def download(job_id: str, filename: str):
     if not job_id.replace("-", "").isalnum():

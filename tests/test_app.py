@@ -166,3 +166,23 @@ def test_public_blob_store_returns_direct_links(tmp_path, monkeypatch):
     links = app_module.upload_outputs_to_blob(out, {"csv": "a.csv"}, "job1")
 
     assert links["csv"].startswith("https://store.public.blob")
+
+
+def test_blob_cleanup_only_deletes_temporary_inputs(client, monkeypatch):
+    deleted = []
+    monkeypatch.setattr(app_module, "blob_uploads_enabled", lambda: True)
+    monkeypatch.setattr(app_module, "delete_blob_uploads", lambda uploads: deleted.extend(i["url"] for i in uploads.values()))
+
+    response = client.post(
+        "/blob-cleanup",
+        json={
+            "urls": [
+                "https://abc.private.blob.vercel-storage.com/shopify-listing/input/job/a.xlsx",
+                "https://abc.private.blob.vercel-storage.com/shopify-listing/outputs/job/a.csv",
+                "https://evil.example.com/shopify-listing/input/job/a.xlsx",
+            ]
+        },
+    )
+
+    assert response.get_json() == {"deleted": 1}
+    assert deleted == ["https://abc.private.blob.vercel-storage.com/shopify-listing/input/job/a.xlsx"]
